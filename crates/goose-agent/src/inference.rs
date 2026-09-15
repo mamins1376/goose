@@ -7,7 +7,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::StreamExt;
 use goose_provider_types::base::Provider;
-use goose_provider_types::conversation::message::{InferenceMetadata, Message, MessageContent};
+use goose_provider_types::conversation::message::{
+    InferenceMetadata, Message, MessageContent, SystemNotificationType,
+};
 use goose_provider_types::conversation::token_usage::ProviderUsage;
 use goose_provider_types::conversation::{
     effective_role, fix_conversation, merge_consecutive_messages_for_request, Conversation,
@@ -342,6 +344,14 @@ impl<'a, S: Sync, E: InferenceEffect> InferenceRunner<'a, S, E> {
         let message = emit.message(message).await;
         vec![E::from(message)]
     }
+
+    async fn retry_notice(&self, emit: &Emitter, attempt: u32, max_retries: u32) {
+        let notice = Message::assistant().with_system_notification(
+            SystemNotificationType::InlineMessage,
+            format!("network interrupted — retrying ({attempt}/{max_retries})…",),
+        );
+        emit.message(notice).await;
+    }
 }
 
 #[async_trait]
@@ -477,6 +487,7 @@ impl<S: Sync, E: InferenceEffect> Inference<S, E> for InferenceRunner<'_, S, E> 
                     Err(err) => {
                         if can_retry_stream(&err, attempt, max_retries, &accumulator) {
                             attempt += 1;
+                            self.retry_notice(emit, attempt, max_retries).await;
                             tokio::time::sleep(retry_backoff(attempt)).await;
                             continue;
                         }
@@ -538,6 +549,7 @@ impl<S: Sync, E: InferenceEffect> Inference<S, E> for InferenceRunner<'_, S, E> 
                     if let Some(usage) = provider_usage.take() {
                         usage_effects.push(E::record_usage(usage));
                     }
+                    self.retry_notice(emit, attempt, max_retries).await;
                     tokio::time::sleep(retry_backoff(attempt)).await;
                     continue;
                 }
