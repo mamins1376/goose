@@ -24,6 +24,8 @@ use crate::operation::{
     Inference, InferenceInput, Operation, OperationResult,
 };
 
+use crate::events::{AgentEvent, LlmStage};
+
 pub struct PreparedInferenceRequest {
     pub system_prompt: String,
     pub tools: Vec<rmcp::model::Tool>,
@@ -471,6 +473,8 @@ impl<S: Sync, E: InferenceEffect> Inference<S, E> for InferenceRunner<'_, S, E> 
                 let conversation_for_provider = Conversation::new_unvalidated(
                     merge_consecutive_messages_for_request(fixed.messages().clone()),
                 );
+
+                emit.emit(AgentEvent::Stage(LlmStage::Prefilling)).await;
 
                 let stream = self
                     .provider

@@ -44,7 +44,7 @@ use crate::agents::types::{
     SessionConfig, SharedProvider, DEFAULT_ON_FAILURE_TIMEOUT_SECONDS,
     DEFAULT_RETRY_TIMEOUT_SECONDS,
 };
-use crate::agents::AgentEvent;
+use crate::agents::{AgentEvent, LlmStage};
 use crate::config::extensions::name_to_key;
 use crate::config::permission::PermissionManager;
 use crate::config::{Config, GooseMode};
@@ -2676,6 +2676,8 @@ impl Agent {
                     break;
                 }
 
+                yield AgentEvent::Stage(LlmStage::Prefilling);
+
                 let mut stream = crate::agents::reply_parts::stream_response_from_provider(
                     self.provider().await?,
                     model_config.clone(),
@@ -5234,6 +5236,7 @@ echo start >> "$PLUGIN_ROOT/hook.log"
                 AgentEvent::McpNotification(_)
                 | AgentEvent::HistoryReplaced(_)
                 | AgentEvent::Usage(_)
+                | AgentEvent::Stage(_)
                 | AgentEvent::MessageUsage { .. } => {}
             }
         }
