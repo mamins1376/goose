@@ -18,9 +18,11 @@ use crate::formats::openai_responses::{
 use crate::http_status::read_json_response;
 use crate::images::ImageFormat;
 use crate::openai_compatible::{
-    handle_response_openai_compat, handle_status, stream_openai_compat, stream_responses_compat,
+    handle_response_openai_compat, handle_status, stream_openai_compat_with_timeouts,
+    stream_responses_compat_with_timeouts,
 };
 use crate::request_log::{start_log, LoggerHandleExt};
+use crate::stream_util::StreamTimeouts;
 use crate::thinking::ThinkingEffort;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -135,6 +137,9 @@ pub struct OpenAiProvider {
     preserve_thinking_context: bool,
     #[serde(skip)]
     n_ctx_cache: Arc<Mutex<HashMap<String, CachedContextLimit>>>,
+    /// Idle budgets for the SSE line stream; overridable per provider.
+    #[serde(skip)]
+    stream_timeouts: StreamTimeouts,
 }
 
 /// Builder for [`OpenAiProvider`].
@@ -154,6 +159,7 @@ pub struct OpenAiProviderBuilder {
     dynamic_models: Option<bool>,
     skip_canonical_filtering: bool,
     preserve_thinking_context: bool,
+    stream_timeouts: StreamTimeouts,
 }
 
 impl OpenAiProviderBuilder {
@@ -170,7 +176,13 @@ impl OpenAiProviderBuilder {
             dynamic_models: None,
             skip_canonical_filtering: false,
             preserve_thinking_context: false,
+            stream_timeouts: StreamTimeouts::default(),
         }
+    }
+
+    pub fn stream_timeouts(mut self, stream_timeouts: StreamTimeouts) -> Self {
+        self.stream_timeouts = stream_timeouts;
+        self
     }
 
     pub fn api_client(mut self, api_client: ApiClient) -> Self {
@@ -255,6 +267,7 @@ impl OpenAiProviderBuilder {
             skip_canonical_filtering: self.skip_canonical_filtering,
             preserve_thinking_context: self.preserve_thinking_context,
             n_ctx_cache: Arc::new(Mutex::new(HashMap::new())),
+            stream_timeouts: self.stream_timeouts,
         }
     }
 }
@@ -308,7 +321,7 @@ impl OpenAiProvider {
                 let _ = log.error(e);
             })?;
         if self.supports_streaming {
-            stream_responses_compat(response, log)
+            stream_responses_compat_with_timeouts(response, log, self.stream_timeouts)
         } else {
             let json: serde_json::Value = read_json_response(response).await?;
             let parsed: ResponsesApiResponse =
@@ -354,6 +367,7 @@ impl OpenAiProvider {
             skip_canonical_filtering: false,
             preserve_thinking_context: false,
             n_ctx_cache: Arc::new(Mutex::new(HashMap::new())),
+            stream_timeouts: StreamTimeouts::default(),
         }
     }
 
@@ -820,7 +834,7 @@ impl Provider for OpenAiProvider {
                 })?;
 
             if self.supports_streaming {
-                stream_openai_compat(response, log)
+                stream_openai_compat_with_timeouts(response, log, self.stream_timeouts)
             } else {
                 let json: serde_json::Value = read_json_response(response).await?;
 
@@ -913,6 +927,9 @@ pub fn from_declarative_config(
 
     let timeout_secs = config.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS);
 
+    // Read before `config`'s fields are moved into the builder below.
+    let stream_timeouts = config.stream_timeouts();
+
     let auth = match api_key {
         Some(key) if !key.is_empty() => AuthMethod::BearerToken(key),
         _ => AuthMethod::NoAuth,
@@ -949,7 +966,8 @@ pub fn from_declarative_config(
         .custom_models(custom_models)
         .dynamic_models(config.dynamic_models)
         .skip_canonical_filtering(config.skip_canonical_filtering)
-        .preserve_thinking_context(config.preserves_thinking))
+        .preserve_thinking_context(config.preserves_thinking)
+        .stream_timeouts(stream_timeouts))
 }
 
 pub fn parse_custom_headers(s: String) -> HashMap<String, String> {
@@ -1008,6 +1026,7 @@ mod tests {
             skip_canonical_filtering: false,
             preserve_thinking_context: false,
             n_ctx_cache: Arc::new(Mutex::new(HashMap::new())),
+            stream_timeouts: StreamTimeouts::default(),
         }
     }
 
@@ -1390,6 +1409,8 @@ mod tests {
             headers: None,
             session_id_header_override: None,
             timeout_seconds: None,
+            stream_chunk_timeout_secs: None,
+            stream_first_line_timeout_secs: None,
             supports_streaming: None,
             requires_auth: false,
             catalog_provider_id: None,
@@ -1511,6 +1532,7 @@ mod tests {
             skip_canonical_filtering: false,
             preserve_thinking_context: false,
             n_ctx_cache: Arc::new(Mutex::new(HashMap::new())),
+            stream_timeouts: StreamTimeouts::default(),
         }
     }
 
