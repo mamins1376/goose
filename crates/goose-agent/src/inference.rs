@@ -523,6 +523,10 @@ impl<S: Sync, E: InferenceEffect> Inference<S, E> for InferenceRunner<'_, S, E> 
                                 provider_usage = Some(usage);
                             }
                             if let Some(mut chunk) = msg_opt {
+                                if let Some(stage) = chunk.metadata.llm_stage {
+                                    emit.emit(AgentEvent::Stage(stage)).await;
+                                    continue;
+                                }
                                 if let Some(inference) = &inference {
                                     chunk = chunk.with_inference_if_assistant(inference.clone());
                                 }
