@@ -1344,6 +1344,8 @@ impl CliSession {
         });
         let _drop_handle = AbortOnDropHandle::new(handle);
 
+        let sent_text = user_message.as_concat_text();
+
         let mut stream = self
             .agent
             .reply(
@@ -1491,12 +1493,22 @@ impl CliSession {
                                 log_tool_metrics(&message, &self.messages);
                                 self.messages.push(message.clone());
 
-                                if interactive { output::update_thinking_indicator(&message) };
+                                // Commands are echoed back on the stream so clients
+                                // that build a transcript from events can show them.
+                                // This CLI already put the line the user typed on
+                                // screen, so rendering the echo would repeat it; the
+                                // echo also ends without a newline, which would leave
+                                // whatever follows it on the same terminal line.
+                                let is_input_echo = is_echo_of_sent_message(&message, &sent_text);
+
+                                if interactive && !is_input_echo {
+                                    output::update_thinking_indicator(&message)
+                                };
                                 let _ = progress_bars.hide();
 
                                 if is_stream_json_mode {
                                     emit_stream_event(&StreamEvent::Message { message: message.clone() });
-                                } else if !is_json_mode {
+                                } else if !is_json_mode && !is_input_echo {
                                     output::render_message_streaming(&message, &mut markdown_buffer, &mut thinking_header_shown, self.debug);
                                     maybe_open_credits_top_up_url(
                                         &message,
@@ -2038,6 +2050,14 @@ impl CliSession {
     fn push_message(&mut self, message: Message) {
         self.messages.push(message);
     }
+}
+
+/// Whether a message arriving on the stream is the agent echoing the message
+/// this turn was started with.
+fn is_echo_of_sent_message(message: &Message, sent_text: &str) -> bool {
+    message.role == rmcp::model::Role::User
+        && !sent_text.is_empty()
+        && message.as_concat_text() == sent_text
 }
 
 async fn create_successor_session(
@@ -2698,6 +2718,33 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
     use test_case::test_case;
+
+    #[test]
+    fn the_agent_echo_of_the_sent_message_is_recognized() {
+        let sent = Message::user().with_text("/compact");
+        let echo = Message::user().with_text("/compact");
+
+        assert!(is_echo_of_sent_message(&echo, &sent.as_concat_text()));
+    }
+
+    #[test]
+    fn a_different_user_message_is_not_an_echo() {
+        let other = Message::user().with_text("a reply the user sent later");
+
+        assert!(!is_echo_of_sent_message(&other, "/compact"));
+    }
+
+    #[test]
+    fn a_tool_response_from_the_user_is_not_an_echo() {
+        let response = Message::user().with_tool_response(
+            "call_1",
+            Ok(rmcp::model::CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text("/compact"),
+            ])),
+        );
+
+        assert!(!is_echo_of_sent_message(&response, "/compact"));
+    }
 
     #[test]
     fn only_headless_terminal_failures_are_propagated() {
