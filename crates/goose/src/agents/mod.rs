@@ -14,6 +14,7 @@ pub mod platform_extensions;
 pub mod platform_tools;
 pub mod prompt_manager;
 pub mod reply_parts;
+pub mod request_size;
 pub mod retry;
 #[cfg(feature = "scheduler")]
 mod schedule_tool;
