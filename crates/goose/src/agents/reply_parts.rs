@@ -23,6 +23,7 @@ use crate::providers::toolshim::{
     augment_message_with_selected_tool_interpreter, convert_tool_messages_to_text,
     modify_system_prompt_for_tool_json, sanitize_residual_markers,
 };
+use crate::session::compaction_event::{CompactionEvent, CompactionTrigger};
 use goose_providers::conversation::token_usage::{CostSource, ProviderStats, ProviderUsage, Usage};
 use goose_providers::model::ModelConfig;
 use rmcp::model::{ErrorData, Tool};
@@ -783,6 +784,101 @@ impl Agent {
             .await?;
 
         Ok(enriched)
+    }
+
+    /// Apply a compaction the model asked for, if one is pending and permitted.
+    ///
+    /// On success the caller's conversation is replaced with the compacted one
+    /// and the notice for the user is returned; `None` means nothing was
+    /// pending. Refusals and denials return a notice without touching history.
+    pub(crate) async fn apply_requested_compaction(
+        &self,
+        session_manager: &Arc<crate::session::SessionManager>,
+        session_id: &str,
+        model_config: &ModelConfig,
+        conversation: &mut Conversation,
+    ) -> Result<Option<Message>> {
+        use crate::agents::session_requests::{
+            applied_notice, decide, denied_notice, refusal_message, CompactionDecision,
+            SessionRequestState,
+        };
+
+        let session = session_manager.get_session(session_id, false).await?;
+        let mut state = SessionRequestState::read(&session);
+
+        if let Some(denied) = state.denied_compaction.take() {
+            state.persist(session_manager, session_id).await?;
+            return Ok(Some(denied_notice(&denied)));
+        }
+
+        let Some(request) = state.take_pending() else {
+            return Ok(None);
+        };
+
+        match decide(&session, conversation) {
+            CompactionDecision::Denied => {
+                state.defer_denied(request.clone());
+                state.persist(session_manager, session_id).await?;
+                Ok(Some(denied_notice(&request)))
+            }
+            CompactionDecision::Refused(detail) => {
+                state.persist(session_manager, session_id).await?;
+                Ok(Some(refusal_message(&detail)))
+            }
+            CompactionDecision::Apply => {
+                let provider = self.provider().await?;
+                let before = conversation.clone();
+                let before_tokens = session.usage.total_tokens;
+                match crate::context_mgmt::compact_messages(
+                    provider.as_ref(),
+                    model_config,
+                    session_id,
+                    conversation,
+                    false,
+                )
+                .await
+                {
+                    Ok(result) => {
+                        let compacted = crate::session::compaction_event::ensure_message_ids(
+                            result.conversation,
+                        );
+                        let event = CompactionEvent::new(
+                            CompactionTrigger::Model,
+                            Some(request.reason.clone()),
+                            &before,
+                            &compacted,
+                            before_tokens,
+                            Some(result.retained_context_tokens),
+                        );
+                        session_manager
+                            .save_compacted_conversation(session_id, &compacted, &event)
+                            .await?;
+                        self.update_session_metrics(
+                            session_id,
+                            None,
+                            &result.usage,
+                            Some(result.retained_context_tokens),
+                        )
+                        .await?;
+                        state.mark_applied(&request);
+                        state.persist(session_manager, session_id).await?;
+                        *conversation = compacted;
+                        Ok(Some(applied_notice(
+                            &request,
+                            before_tokens,
+                            Some(result.retained_context_tokens),
+                            event.archived_message_count(),
+                        )))
+                    }
+                    Err(error) => {
+                        state.persist(session_manager, session_id).await?;
+                        Ok(Some(refusal_message(&format!(
+                            "compaction failed ({error}); ask again if you still need it"
+                        ))))
+                    }
+                }
+            }
+        }
     }
 
     fn resolve_chunk_cost(
