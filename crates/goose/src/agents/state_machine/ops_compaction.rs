@@ -20,6 +20,7 @@ use crate::conversation::message::{
 };
 use crate::conversation::{Conversation, EffectiveRole};
 use crate::providers::base::Provider;
+use crate::session::compaction_event::{CompactionEvent, CompactionTrigger};
 use crate::session::Session;
 use goose_providers::model::ModelConfig;
 
@@ -148,8 +149,11 @@ impl CompactionOperation {
     }
 
     async fn clear(
+        session: &Session,
         conversation: &Conversation,
+        destroy: bool,
         emit: &Emitter,
+        before_tokens: Option<i32>,
     ) -> Result<OperationResult<GooseEffect>> {
         let command = messages_since_kickoff(conversation)?
             .first()
@@ -161,8 +165,17 @@ impl CompactionOperation {
             .with_visibility(true, false);
         let command = emit.message(command).await;
         let response = emit.message(response).await;
+        let event = CompactionEvent::new(
+            CompactionTrigger::Clear,
+            None,
+            conversation,
+            &Conversation::empty(),
+            before_tokens,
+            Some(0),
+        );
+        let _ = session;
         yielded_with([
-            Conversation::default().into(),
+            GooseEffect::ClearConversation { destroy, event },
             command.into(),
             response.into(),
         ])
@@ -183,7 +196,11 @@ impl Operation<Session, GooseEffect> for CompactionOperation {
         emit: &Emitter,
     ) -> Result<OperationResult<GooseEffect>> {
         match command.command {
-            "clear" => return Self::clear(conversation, emit).await,
+            "clear" => {
+                let destroy = command.params_str == "--destroy";
+                let before_tokens = self.context_tokens(session, conversation).await.ok();
+                return Self::clear(session, conversation, destroy, emit, before_tokens).await;
+            }
             "compact" => {}
             _ => return not_applicable(),
         }
@@ -224,10 +241,19 @@ impl Operation<Session, GooseEffect> for CompactionOperation {
             .with_visibility(true, false);
         emit.message(command).await;
         let response = emit.message(response).await;
+        let event = CompactionEvent::new(
+            CompactionTrigger::Manual,
+            None,
+            conversation,
+            &compacted,
+            session.usage.total_tokens,
+            Some(result.retained_context_tokens),
+        );
         yielded_with([
             GooseEffect::CompactConversation {
                 conversation: compacted,
                 usage: Some(usage),
+                event,
             },
             response.into(),
         ])
@@ -343,6 +369,18 @@ impl Operation<Session, GooseEffect> for CompactionOperation {
                 let compacted = result.conversation;
                 let usage = result.usage;
                 record_chat_usage(&span, &usage);
+                let event = CompactionEvent::new(
+                    if reactive_context_error {
+                        CompactionTrigger::Recovery
+                    } else {
+                        CompactionTrigger::Threshold
+                    },
+                    None,
+                    conversation,
+                    &compacted,
+                    self.context_tokens(session, conversation).await.ok(),
+                    Some(result.retained_context_tokens),
+                );
                 emit.message(Message::assistant().with_system_notification(
                     SystemNotificationType::InlineMessage,
                     "Compaction complete",
@@ -351,6 +389,7 @@ impl Operation<Session, GooseEffect> for CompactionOperation {
                 applied([GooseEffect::CompactConversation {
                     conversation: compacted,
                     usage: Some(usage),
+                    event,
                 }])
             }
             Err(e) => {

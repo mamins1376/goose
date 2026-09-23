@@ -6,6 +6,7 @@ use anyhow::{anyhow, Result};
 use crate::context_mgmt::compact_messages;
 use crate::conversation::message::Message;
 use crate::recipe::Recipe;
+use crate::session::compaction_event::{CompactionEvent, CompactionTrigger};
 use crate::slash_commands::{recipe_slash_command, skill_slash_command};
 
 use super::Agent;
@@ -39,7 +40,7 @@ static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "clear",
-        description: "Clear the conversation history",
+        description: "Clear the conversation history, keeping it archived; --destroy deletes it",
     },
     CommandDef {
         name: "skills",
@@ -61,6 +62,11 @@ static COMMANDS: &[CommandDef] = &[
     CommandDef {
         name: "status",
         description: "Show session status: model, provider, mode, and token usage",
+    },
+    CommandDef {
+        name: "archive",
+        description:
+            "List the history that compaction or /clear took away, or show one event's messages",
     },
 ];
 
@@ -155,10 +161,11 @@ impl Agent {
             "prompts" => self.handle_prompts_command(&params, session_id).await,
             "prompt" => self.handle_prompt_command(&params, session_id).await,
             "compact" => self.handle_compact_command(session_id).await,
-            "clear" => self.handle_clear_command(session_id).await,
+            "clear" => self.handle_clear_command(session_id, params_str).await,
             "skills" => self.handle_skills_command(session_id).await,
             "doctor" => Ok(Some(crate::doctor::run(self, session_id).await?)),
             "status" => self.handle_status_command(session_id).await,
+            "archive" => self.handle_archive_command(session_id, params_str).await,
             "goal" => self.handle_goal_command(params_str).await,
             "grind" => self.handle_grind_command(params_str).await,
             _ => {
@@ -202,8 +209,18 @@ impl Agent {
         )
         .await?;
 
+        let compacted =
+            crate::session::compaction_event::ensure_message_ids(compaction.conversation);
+        let event = CompactionEvent::new(
+            CompactionTrigger::Manual,
+            None,
+            &conversation,
+            &compacted,
+            session.usage.total_tokens,
+            Some(compaction.retained_context_tokens as i32),
+        );
         manager
-            .replace_conversation(session_id, &compaction.conversation)
+            .save_compacted_conversation(session_id, &compacted, &event)
             .await?;
 
         self.update_session_metrics(
@@ -217,7 +234,11 @@ impl Agent {
         Ok(Some(user_only_assistant_text("Compaction complete")))
     }
 
-    async fn handle_clear_command(&self, session_id: &str) -> Result<Option<Message>> {
+    async fn handle_clear_command(
+        &self,
+        session_id: &str,
+        params_str: &str,
+    ) -> Result<Option<Message>> {
         use crate::conversation::Conversation;
 
         let provider = self.provider().await?;
@@ -228,10 +249,26 @@ impl Agent {
             )));
         }
 
+        let destroy = params_str == "--destroy";
         let manager = self.config.session_manager.clone();
-        manager
-            .replace_conversation(session_id, &Conversation::default())
-            .await?;
+        let session = manager.get_session(session_id, true).await?;
+        let conversation = session.conversation.unwrap_or_default();
+        let event = CompactionEvent::new(
+            CompactionTrigger::Clear,
+            None,
+            &conversation,
+            &Conversation::empty(),
+            session.usage.total_tokens,
+            Some(0),
+        );
+
+        if destroy {
+            manager
+                .replace_conversation(session_id, &Conversation::default())
+                .await?;
+        } else {
+            manager.archive_conversation(session_id, &event).await?;
+        }
 
         manager
             .update(session_id)
@@ -296,13 +333,25 @@ impl Agent {
             "N/A".to_string()
         };
 
+        let archive = self
+            .config
+            .session_manager
+            .list_compaction_events(session_id)
+            .await
+            .map(|events| {
+                crate::session::session_manager::archive_summary(&events)
+                    .map(|line| format!("\n{line}"))
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+
         let text = format!(
             "**Session status**\n\n\
              - Model: {}\n\
              - Provider: {}\n\
              - Mode: {}\n\
              - Tokens (lifetime): {}\n\
-             - Context: {} / {} tokens ({})",
+             - Context: {} / {} tokens ({}){}",
             model_config.model_name,
             provider.get_name(),
             goose_mode,
@@ -310,9 +359,24 @@ impl Agent {
             context_tokens,
             context_limit,
             context_pct,
+            archive,
         );
 
         Ok(Some(user_only_assistant_text(text)))
+    }
+
+    async fn handle_archive_command(
+        &self,
+        session_id: &str,
+        params_str: &str,
+    ) -> Result<Option<Message>> {
+        let report = crate::session::session_manager::archive_report(
+            &self.config.session_manager,
+            session_id,
+            params_str,
+        )
+        .await?;
+        Ok(Some(user_only_assistant_text(report)))
     }
 
     async fn handle_prompts_command(
@@ -587,9 +651,19 @@ mod tests {
     #[test]
     fn parse_slash_command_splits_on_literal_space() {
         let parsed = parse_slash_command("/speckit.plan hello world").unwrap();
-
         assert_eq!(parsed.command, "speckit.plan");
         assert_eq!(parsed.params_str, "hello world");
+    }
+
+    #[test]
+    fn clear_accepts_the_destroy_flag() {
+        let parsed = parse_slash_command("/clear --destroy").unwrap();
+        assert_eq!(parsed.command, "clear");
+        assert_eq!(parsed.params_str, "--destroy");
+
+        let parsed = parse_slash_command("/clear").unwrap();
+        assert_eq!(parsed.command, "clear");
+        assert_eq!(parsed.params_str, "");
     }
 
     #[test]

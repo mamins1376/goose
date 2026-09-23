@@ -1,4 +1,5 @@
 mod chat_history_search;
+pub mod compaction_event;
 mod diagnostics;
 mod export_markdown;
 pub mod extension_data;
@@ -10,6 +11,7 @@ pub mod nostr_share;
 pub mod session_manager;
 mod session_naming;
 
+pub use compaction_event::{CompactionEvent, CompactionTrigger};
 pub use diagnostics::{
     config_path, generate_diagnostics, get_system_info, latest_llm_log_path, read_capped,
     read_tail, recent_cli_log_paths, DiagnosticsConfig, DiagnosticsError, DiagnosticsExtensions,
@@ -22,4 +24,5 @@ pub use export_markdown::{
 pub use extension_data::{EnabledExtensionsState, ExtensionData, ExtensionState, TodoState};
 pub use session_manager::{
     Session, SessionInsights, SessionManager, SessionNameUpdate, SessionType, SessionUpdateBuilder,
+    StoredCompactionEvent,
 };
