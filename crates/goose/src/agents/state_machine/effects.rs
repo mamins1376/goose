@@ -18,6 +18,8 @@ pub enum GooseEffect {
         destroy: bool,
         event: CompactionEvent,
     },
+    /// Record history that was taken away without replacing the conversation.
+    RecordArchiveEvent(CompactionEvent),
     SetRecipe(Box<Option<Recipe>>),
     SetExtensionData(ExtensionData),
     RecordUsage(ProviderUsage),
