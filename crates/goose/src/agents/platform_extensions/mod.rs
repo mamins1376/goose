@@ -11,6 +11,7 @@ pub mod ext_manager;
 pub mod orchestrator;
 #[cfg(feature = "scheduler")]
 pub mod scheduler;
+pub mod session_manager_ext;
 pub mod summarize;
 pub mod summon;
 pub mod todo;
@@ -75,6 +76,24 @@ pub static PLATFORM_EXTENSIONS: Lazy<HashMap<&'static str, PlatformExtensionDef>
                 unprefixed_tools: false,
                 hidden: false,
                 client_factory: |ctx| Some(Box::new(apps::AppsManagerClient::new(ctx).unwrap())),
+            },
+        );
+
+        map.insert(
+            session_manager_ext::EXTENSION_NAME,
+            PlatformExtensionDef {
+                name: session_manager_ext::EXTENSION_NAME,
+                display_name: "Session Manager",
+                description:
+                    "Report the session's context usage and archived history so the model can plan around the context window",
+                default_enabled: true,
+                unprefixed_tools: false,
+                hidden: false,
+                client_factory: |ctx| {
+                    Some(Box::new(
+                        session_manager_ext::SessionManagerClient::new(ctx).unwrap(),
+                    ))
+                },
             },
         );
 
